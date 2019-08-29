@@ -45,6 +45,7 @@ OBJECT_TO_IDX = {
     'goal'          : 8,
     'lava'          : 9,
     'agent'         : 10,
+    'sticky_floor'  : 11,
 }
 
 IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
@@ -132,6 +133,7 @@ class Floor(WorldObj):
 
     def __init__(self, color='blue'):
         super().__init__('floor', color)
+        self._escape_probability
 
     def can_overlap(self):
         return True
@@ -147,6 +149,30 @@ class Floor(WorldObj):
             (CELL_PIXELS,           1),
             (1          ,           1)
         ])
+
+class StickyFloor(WorldObj):
+    """
+    Colored floor tile the agent can walk over
+    """
+    def __init__(self, color='blue', sticky_probability=0):
+        super().__init__('sticky_floor', color)
+        self.rgb = (COLORS[self.color] * sticky_probability).astype('int64')
+        self.sticky_probability = sticky_probability
+
+    def can_overlap(self):
+        return True
+
+    def render(self, r):
+        # Give the floor a pale color
+        r.setLineColor(100, 100, 100, 0)
+        r.setColor(*self.rgb)
+        r.drawPolygon([
+            (1          , CELL_PIXELS),
+            (CELL_PIXELS, CELL_PIXELS),
+            (CELL_PIXELS,           1),
+            (1          ,           1)
+        ])
+
 
 class Lava(WorldObj):
     def __init__(self):
@@ -425,6 +451,9 @@ class Grid:
         self.vert_wall(x, y, h)
         self.vert_wall(x+w-1, y, h)
 
+    def sticky_floor(self, x, y, sticky_prob):
+        self.set(x, y, StickyFloor(sticky_probability=sticky_prob))
+
     def rotate_left(self):
         """
         Rotate the grid to the left (counter-clockwise)
@@ -648,14 +677,14 @@ class MiniGridEnv(gym.Env):
         forward = 2
 
         # Pick up an object
-        pickup = 3
+        # pickup = 3
         # Drop an object
-        drop = 4
+        # drop = 4
         # Toggle/activate an object
-        toggle = 5
+        # toggle = 5
 
         # Done completing task
-        done = 6
+        # done = 6
 
     def __init__(
         self,
@@ -677,7 +706,11 @@ class MiniGridEnv(gym.Env):
         self.actions = MiniGridEnv.Actions
 
         # Actions are discrete integer values
-        self.action_space = spaces.Discrete(len(self.actions))
+        self.action_space = spaces.Box(
+            low=0,
+            high=len(self.actions),
+            shape=(len(self.actions),),
+            dtype='uint8')
 
         # Number of cells (width and height) in the agent view
         self.agent_view_size = agent_view_size
@@ -745,6 +778,7 @@ class MiniGridEnv(gym.Env):
 
         # Return first observation
         obs = self.gen_obs()
+
         return obs
 
     def seed(self, seed=1337):
@@ -1093,6 +1127,10 @@ class MiniGridEnv(gym.Env):
 
     def step(self, action):
         self.step_count += 1
+        if isinstance(action, np.ndarray):
+            if action.shape[0] == len(self.actions):
+                action = np.where(action == 1)[0]
+            action = action[0]
 
         reward = 0
         done = False
@@ -1115,8 +1153,15 @@ class MiniGridEnv(gym.Env):
 
         # Move forward
         elif action == self.actions.forward:
+            ## check what type of floor. If floor is sticky, low chance of leaving.
+            success_prob = 1
+            curr_cell = self.grid.get(*self.agent_pos)
+            if curr_cell.type == 'sticky_floor':
+                success_prob = 1 - curr_cell.sticky_probability
+                # print(success_prob)
             if fwd_cell == None or fwd_cell.can_overlap():
-                self.agent_pos = fwd_pos
+                if self._rand_float(0, 1) > (1 - success_prob):
+                    self.agent_pos = fwd_pos
             if fwd_cell != None and fwd_cell.type == 'goal':
                 done = True
                 reward = self._reward()
@@ -1154,7 +1199,6 @@ class MiniGridEnv(gym.Env):
             done = True
 
         obs = self.gen_obs()
-
         return obs, reward, done, {}
 
     def gen_obs_grid(self):
@@ -1226,6 +1270,7 @@ class MiniGridEnv(gym.Env):
             )
 
         r = self.obs_render
+        self.obs_render = None
 
         r.beginFrame()
 
@@ -1256,7 +1301,7 @@ class MiniGridEnv(gym.Env):
 
         return r.getPixmap()
 
-    def render(self, mode='human', close=False, highlight=True):
+    def render(self, mode='human', close=False, highlight=False, width=None, height=None):
         """
         Render the whole-grid human view
         """
@@ -1335,5 +1380,4 @@ class MiniGridEnv(gym.Env):
             return r.getArray()
         elif mode == 'pixmap':
             return r.getPixmap()
-
         return r
